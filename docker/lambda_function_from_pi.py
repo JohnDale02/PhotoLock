@@ -3,25 +3,33 @@ import json
 import base64
 import mysql.connector
 import os
-import base64
 import cv2
 import numpy as np
-import os
 from twilio.rest import Client
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives import serialization
 from cryptography.exceptions import InvalidSignature
-from cryptography.hazmat.backends import default_backend
 import hashlib
 import subprocess
 
-# Possible updates
-# - Done hardcode bucket name and object key
-# - want cameras to have differnt object keys so not overwriting eachother 
-#   - Ex. object_key = "NewImage_1.png" for camera 1 and "NewImage_2.png" so both devices are overwriting eachothers if picture at same time
-
 def handler(event, context):
+    """
+    AWS Lambda handler for processing and verifying media files uploaded to S3.
+
+    This function handles media files (images and videos) uploaded to an S3 bucket, verifies
+    their authenticity using digital signatures, and processes the verified files. If the
+    verification is successful, the media is converted (if necessary), uploaded to another
+    S3 bucket, and a notification is sent via SMS. If verification fails, an SMS notification
+    is sent indicating the failure.
+
+    Args:
+        event (dict): The event payload containing S3 object details.
+        context (object): AWS Lambda context object (not used in this function).
+
+    Returns:
+        dict: A dictionary containing the HTTP status code, success message, and any errors.
+    """
     # Create an S3 client
     s3_client = boto3.client('s3')
 
@@ -30,10 +38,8 @@ def handler(event, context):
     print("Object key: should be NewImage.png or NewVideo.avi", object_key)
     bucket_name = 'unverifiedimages'
 
-    image = False   # video default
-    if object_key.endswith(".png"):
-        image = True  # we have an image now 
-    
+    # Determine if the file is an image or video based on the file extension
+    image = object_key.endswith(".png")
     print(f"Is this an image: {image}")
 
     errors = ""
@@ -41,27 +47,22 @@ def handler(event, context):
     try:
         # Get the object from S3
         try:
-            #bucket_name = 'unverifiedimages'
-            #object_key = 'NewImage.png'
             response = s3_client.get_object(Bucket=bucket_name, Key=object_key)
-
         except Exception as e:
-            errors = errors + "Error:" + f"Get object error : {str(e)}"
+            errors += f"Error: Get object error : {str(e)}"
 
-
-        if image: 
-            temp_media_path = '/tmp/TempNewImage.png'   # recreate the png using the cv2 png object bytes recieved
+        # Process the media based on whether it's an image or video
+        if image:
+            temp_media_path = '/tmp/TempNewImage.png'
             s3_client.download_file(bucket_name, object_key, temp_media_path)
             media = cv2.imread(temp_media_path)
-            _, encoded_image = cv2.imencode('.png', media)  # we send the encoded image to the cloud
+            _, encoded_image = cv2.imencode('.png', media)
             encoded_media = encoded_image.tobytes()
-
         else:
             temp_media_path = '/tmp/TempNewVideo.avi'
             s3_client.download_file(bucket_name, object_key, temp_media_path)
             print("Downloading video Done")
             temp_mp4_path = '/tmp/TempNewMp4.mp4'
-
             with open(temp_media_path, 'rb') as video:
                 encoded_media = video.read()
                 print(encoded_media[-10:])
@@ -71,68 +72,64 @@ def handler(event, context):
 
         try:
             fingerprint, camera_number, date_data, time_data, location_data, signature, signature_string = recreate_data(metadata)
-
         except Exception as e:
-            errors = errors + "Error:" + f"Cannot recreate time and metadata {str(e)}"
+            errors += f"Error: Cannot recreate time and metadata {str(e)}"
 
-        try: 
-            print("Storing json details")
+        try:
+            print("Storing JSON details")
             store_json_details(temp_media_path, fingerprint, camera_number, date_data, time_data, location_data, signature_string)
-            print("Stored json details")
-        except Exception as e: 
-            errors = errors + "Error:" + f"Cannot store json details {str(e)}"
+            print("Stored JSON details")
+        except Exception as e:
+            errors += f"Error: Cannot store JSON details {str(e)}"
         
         try:
             public_key_base64 = get_public_key(int(camera_number))
             public_key = base64.b64decode(public_key_base64)
-
         except Exception as e:
-            errors = errors + "Error:" + f"Public key error: {str(e)}"
+            errors += f"Error: Public key error: {str(e)}"
 
         try:
             combined_data = create_combined(fingerprint, camera_number, encoded_media, date_data, time_data, location_data)
-
         except Exception as e:
-            errors = errors + "Error:" + f"Couldnt combine Data: {str(e)}"
+            errors += f"Error: Couldn't combine data: {str(e)}"
+
         try: 
             valid = verify_signature(combined_data, signature, public_key)
-
         except Exception as e:
-            errors = errors + "Error:" + f"Error verifying or denying signature {str(e)}"
+            errors += f"Error: Error verifying or denying signature {str(e)}"
 
-        if valid == True:
+        if valid:
             try:
-                media_save_name, media_number = upload_verified(s3_client, fingerprint, camera_number, date_data, time_data, location_data, signature, temp_media_path, image)  # save the AVI file
-
+                media_save_name, media_number = upload_verified(
+                    s3_client, fingerprint, camera_number, date_data, time_data, location_data, 
+                    signature, temp_media_path, image
+                )
             except Exception as e:
-                errors = errors + "Issue uploading to verified bucket" + str(e)
+                errors += f"Issue uploading to verified bucket: {str(e)}"
 
-            try: 
+            try:
                 convert_to_mp4(temp_media_path, temp_mp4_path)
-                upload_verified_mp4(s3_client, fingerprint, temp_mp4_path, media_number)  # create and save a mp4 file
-
+                upload_verified_mp4(s3_client, fingerprint, temp_mp4_path, media_number)
             except Exception as e:
-                errors = errors + "Issue uploading to verified bucket" + str(e)
+                errors += f"Issue uploading to verified bucket: {str(e)}"
 
             try:
                 send_text(valid, fingerprint, media_save_name)
-
             except Exception as e:
-                errors = errors + "Issue Sending text: " + str(e)
+                errors += f"Issue sending text: {str(e)}"
 
+            # Clean up temporary files
             os.remove(temp_media_path)
             os.remove(temp_mp4_path)
             
         else:
             try:
                 send_text(valid, fingerprint)
-
             except Exception as e:
-                errors = errors + "Issue Sending text after failing verification" + str(e)
-
+                errors += f"Issue sending text after failing verification: {str(e)}"
 
     except Exception as e:
-        errors = errors + f'There was an exeption: {str(e)}'
+        errors += f'There was an exception: {str(e)}'
 
     print("Errors: ", errors)
 
@@ -142,25 +139,43 @@ def handler(event, context):
         'errors': errors,
     }
 
-
 def recreate_data(metadata):
-    '''Intakes cv2 image data and metadata; returns camera number, time, location, signature, creates image file'''
+    """
+    Extracts and returns relevant data from metadata.
 
+    Args:
+        metadata (dict): The metadata dictionary containing fingerprint, camera number, 
+                         date, time, location, and signature.
+
+    Returns:
+        tuple: A tuple containing fingerprint, camera number, date, time, location, 
+               signature, and signature string.
+    """
     fingerprint = metadata.get('fingerprint')
     camera_number = metadata.get('cameranumber')
     date_data = metadata.get('date')
     time_data = metadata.get('time')
     location_data = metadata.get('location')
-    
     signature_string = metadata.get('signature')
     signature = base64.b64decode(signature_string)
 
     return fingerprint, camera_number, date_data, time_data, location_data, signature, signature_string
 
+def create_combined(fingerprint, camera_number, media, date, time, location):
+    """
+    Combines the provided data into a single byte object.
 
-def create_combined(fingerprint: str, camera_number: str, media: bytes, date: str, time: str, location: str) -> bytes:
-    '''Takes in camera number, image, time, location and encodes then combines to form one byte object'''
+    Args:
+        fingerprint (str): The fingerprint data.
+        camera_number (str): The camera number.
+        media (bytes): The media file data.
+        date (str): The date of the media capture.
+        time (str): The time of the media capture.
+        location (str): The location of the media capture.
 
+    Returns:
+        bytes: The combined byte object containing all provided data.
+    """
     encoded_fingerprint = fingerprint.encode('utf-8')
     encoded_number = camera_number.encode('utf-8')
     encoded_date = date.encode('utf-8')
@@ -171,19 +186,21 @@ def create_combined(fingerprint: str, camera_number: str, media: bytes, date: st
 
     return combined_data
 
-
-
-
 def get_public_key(camera_number):
-    # Environment variables for database connection
-    #host = os.environ['DB_HOST']
-    #user = os.environ['DB_USER']
-    #password = os.environ['DB_PASSWORD']
-    #database = os.environ['DB_NAME']
-    host = "publickeycamerastorage.c90gvpt3ri4q.us-east-2.rds.amazonaws.com"
-    user = "sdp"
-    password = "sdpsdpsdp"
-    database = "PublicKeySchema"
+    """
+    Retrieves the public key for the specified camera number from the database.
+
+    Args:
+        camera_number (int): The camera number for which the public key is to be retrieved.
+
+    Returns:
+        str: The base64-encoded public key.
+    """
+    # Database connection details
+    host = ""
+    user = ""
+    password = ""
+    database = ""
 
     # Connect to the database
     connection = mysql.connector.connect(
@@ -193,7 +210,6 @@ def get_public_key(camera_number):
 
     # SQL query to retrieve the public key
     query = "SELECT PublicKey FROM Cameras WHERE CameraNumber = %s"
-
     cursor.execute(query, (int(camera_number),))
 
     # Fetch the result
@@ -203,86 +219,103 @@ def get_public_key(camera_number):
 
     if result:
         public_key = result[0]
-    
         return public_key  # Return the public key
     
-    else:
-        return 'Public key not found'
-    
+    return 'Public key not found'
 
+def upload_verified(s3_client, fingerprint, camera_number, date_data, time_data, location_data, signature, temp_media_path, image):
+    """
+    Uploads verified media and metadata to an S3 bucket.
 
-def upload_verified(s3_client, fingerprint, camera_number, date_data, time_data, location_data, signature, temp_media_path, image): #################### CHANGED TO FINGERPRINt, BUCKET NOT BASED ON NUMBER BUT FINGERPRINT
-# Get S3 bucket for verified images(camera_number)
+    Args:
+        s3_client: The Boto3 S3 client.
+        fingerprint (str): The fingerprint of the user.
+        camera_number (str): The camera number.
+        date_data (str): The date of the media capture.
+        time_data (str): The time of the media capture.
+        location_data (str): The location of the media capture.
+        signature (bytes): The signature for verification.
+        temp_media_path (str): The path to the temporary media file.
+        image (bool): Whether the media is an image (True) or video (False).
+
+    Returns:
+        tuple: A tuple containing the saved media file name and media number.
+    """
     bucket_name  = ''.join(fingerprint.split()).lower()
     destination_bucket_name = bucket_name
 
     try:
         media_number = get_next_number_for_new_file(destination_bucket_name)
-
     except Exception as e:
         pass
     
-    if image:
-        media_file_name = str(media_number) + '.png'  # Changes file extension
-    else:
-        media_file_name = str(media_number) + '.avi'
+    media_file_name = f"{media_number}.png" if image else f"{media_number}.avi"
 
     # Create JSON data
     json_data = {
-        "Fingerprint": fingerprint,  # string
+        "Fingerprint": fingerprint,
         "Camera Number": camera_number,
-        "Date": date_data,  # string
-        "Time": time_data,  # string
-        "Location": location_data,   # string
-        "Signature_Base64": base64.b64encode(signature).decode('utf-8')  # signature is in base64 encoded (string)
+        "Date": date_data,
+        "Time": time_data,
+        "Location": location_data,
+        "Signature_Base64": base64.b64encode(signature).decode('utf-8')
     }
 
-    # Save JSON data to a file with the same name as the image
-    json_file_name = str(media_number) + '.json'  # Changes file extension to .json
-
+    # Save JSON data to a file with the same name as the media file
+    json_file_name = f"{media_number}.json"
     temp_json_path = f'/tmp/{json_file_name}'
-
 
     with open(temp_json_path, 'w') as json_file:
         json.dump(json_data, json_file)
 
     try:
         s3_client.upload_file(temp_media_path, destination_bucket_name, media_file_name)
-
     except Exception as e:
         pass
         
-    try:     # Upload JSON file to the same new S3 bucket
+    try:  # Upload JSON file to the same S3 bucket
         s3_client.upload_file(temp_json_path, destination_bucket_name, json_file_name)
-        
     except Exception as e:
         pass
-        #print(f"Uploading JSON error : {e}")
 
     # Clean up: Delete temporary files
     os.remove(temp_json_path)
 
     return media_file_name, media_number
 
+def upload_verified_mp4(s3_client, fingerprint, temp_mp4_path, media_number):
+    """
+    Uploads a verified MP4 file to an S3 bucket.
 
-def upload_verified_mp4(s3_client, fingerprint, temp_mp4_path, media_number):  #################### CHANGED TO FINGERPRING, BUCKET NOT BASED ON NUMBER BUT FINGERPRINT
-# Get S3 bucket for verified images(camera_number)
+    Args:
+        s3_client: The Boto3 S3 client.
+        fingerprint (str): The fingerprint of the user.
+        temp_mp4_path (str): The path to the temporary MP4 file.
+        media_number (int): The media number.
+
+    Returns:
+        None
+    """
     bucket_name  = ''.join(fingerprint.split()).lower()
     destination_bucket_name = bucket_name
-
-    media_file_name = str(media_number) + '.mp4'
+    media_file_name = f"{media_number}.mp4"
 
     try:
         s3_client.upload_file(temp_mp4_path, destination_bucket_name, media_file_name, ExtraArgs={'ContentType': 'video/mp4'})
-
     except Exception as e:
         pass
 
-
 def get_next_number_for_new_file(bucket_name):
+    """
+    Retrieves the next available number for a new file in the S3 bucket.
+
+    Args:
+        bucket_name (str): The name of the S3 bucket.
+
+    Returns:
+        int: The next available number for the new file.
+    """
     s3 = boto3.client('s3')
-    
-    # Use paginator to ensure we check all objects if there are more than 1000
     paginator = s3.get_paginator('list_objects_v2')
     highest_number = 0
 
@@ -290,32 +323,34 @@ def get_next_number_for_new_file(bucket_name):
         for obj in page.get('Contents', []):
             file_name = obj['Key']
             try:
-                # Extract the number from the file name
                 number = int(file_name.split('.')[0])
                 if number > highest_number:
                     highest_number = number
             except ValueError:
-                # If the file name does not start with a number, ignore it
                 continue
     
-    # Assuming the sequence is uninterrupted and follows the naming convention strictly
-    next_number = highest_number + 1
-    return next_number
-
-
+    return highest_number + 1
 
 def verify_signature(combined_data, signature, public_key):
+    """
+    Verifies the digital signature of the combined data.
 
+    Args:
+        combined_data (bytes): The combined data that was signed.
+        signature (bytes): The signature to verify.
+        public_key (bytes): The public key to use for verification.
 
+    Returns:
+        bool: True if the signature is valid, False otherwise.
+    """
     temp_public_key_path = '/tmp/recreated_public_key.pem'
 
-    with open(temp_public_key_path, "wb") as file:   # write our decoded public key data back to a pem file
-            file.write(public_key)
+    with open(temp_public_key_path, "wb") as file:
+        file.write(public_key)
 
     with open(temp_public_key_path, "rb") as key_file:
-            public_key_data = key_file.read()
+        public_key_data = key_file.read()
 
-    # Deserialize the public key from PEM format
     public_key = serialization.load_pem_public_key(public_key_data)
 
     try:
@@ -331,35 +366,59 @@ def verify_signature(combined_data, signature, public_key):
     except InvalidSignature:
         os.remove(temp_public_key_path)
         return False
-    
 
 def send_text(valid, fingerprint, image_save_name="default"):
+    """
+    Sends an SMS notification indicating the result of the verification process.
 
-    account_sid = '#'
-    auth_token = '#'
+    Args:
+        valid (bool): Whether the verification was successful.
+        fingerprint (str): The fingerprint of the user.
+        image_save_name (str): The name of the saved image or video file.
+
+    Returns:
+        None
+    """
+    account_sid = '#'  # Twilio Account SID
+    auth_token = '#'   # Twilio Auth Token
     client = Client(account_sid, auth_token)
 
-    if valid == True:
-        Body = f"Your Image was Successfully Authenticated. Stored as {image_save_name}"
-
+    if valid:
+        body = f"Your Image was Successfully Authenticated. Stored as {image_save_name}"
     else:
-        Body = f"Your Image failed to be Authenticated. Deleted"
+        body = f"Your Image failed to be Authenticated. Deleted"
 
-    numbers = {"Dani Kasti": '+18025577844', 
-               "John Dale":'+17819159187',
-               "Darius Paradie": '+16032496942',
-               "Jace Christakis": '+17819993514'}
+    numbers = {
+        "Dani Kasti": '+18025577844', 
+        "John Dale": '+17819159187',
+        "Darius Paradie": '+16032496942',
+        "Jace Christakis": '+17819993514'
+    }
     
     receiving_user = numbers[fingerprint]
 
     message = client.messages.create(
-    from_='+18573664416',
-    body=Body,
-    to=receiving_user
+        from_='+18573664416',
+        body=body,
+        to=receiving_user
     )
 
-
 def store_json_details(temp_image_path, fingerprint, camera_number, date_data, time_data, location_data, signature):
+    """
+    Stores the JSON details of the media in the database.
+
+    Args:
+        temp_image_path (str): The path to the temporary image file.
+        fingerprint (str): The fingerprint of the user.
+        camera_number (str): The camera number.
+        date_data (str): The date of the media capture.
+        time_data (str): The time of the media capture.
+        location_data (str): The location of the media capture.
+        signature (str): The base64-encoded signature.
+
+    Returns:
+        None
+    """
     # Hash the image data to use as an index
     with open(temp_image_path, 'rb') as file:
         data = file.read()
@@ -381,10 +440,10 @@ def store_json_details(temp_image_path, fingerprint, camera_number, date_data, t
     print(f"Details: {details}")
 
     # Database connection details
-    host = "publickeycamerastorage.c90gvpt3ri4q.us-east-2.rds.amazonaws.com"
-    user = "sdp"
-    password = "sdpsdpsdp"
-    database = "PublicKeySchema"
+    host = ""
+    user = ""
+    password = ""
+    database = ""
 
     # Connect to the database
     connection = mysql.connector.connect(
@@ -409,9 +468,17 @@ def store_json_details(temp_image_path, fingerprint, camera_number, date_data, t
 
     print(f"Stored the data with image hash {image_hash}, Time: {time_data}, Date: {date_data}, Location: {location_data}")
 
-
 def convert_to_mp4(temp_media_path, temp_mp4_path):
+    """
+    Converts an AVI file to MP4 using FFmpeg.
 
+    Args:
+        temp_media_path (str): The path to the temporary AVI file.
+        temp_mp4_path (str): The path to save the converted MP4 file.
+
+    Returns:
+        None
+    """
     print("Trying to convert to mp4 from avi...........")
 
     command_convert_to_mp4 = [
@@ -419,7 +486,7 @@ def convert_to_mp4(temp_media_path, temp_mp4_path):
         '-i', temp_media_path,          # Input file path
         '-c:v', 'libx264',              # Video codec to use (H.264)
         '-crf', '23',                   # Constant Rate Factor (CRF) value, 18-28 is a good range, lower is higher quality
-        '-preset', 'medium',          # Preset for compression efficiency (you can use 'medium' for a balance between speed and quality)
+        '-preset', 'medium',            # Preset for compression efficiency (balance between speed and quality)
         '-c:a', 'aac',                  # Audio codec to use (AAC)
         '-b:a', '128k',                 # Audio bitrate
         '-strict', 'experimental',      # Allow experimental codecs (if needed for AAC)

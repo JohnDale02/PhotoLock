@@ -5,20 +5,36 @@ import os
 import tempfile
 
 def handler(event, context):
+    """
+    AWS Lambda function handler for processing AVI files and converting them to MP4.
+    
+    This function:
+    1. Receives a base64-encoded AVI file through the event.
+    2. Converts the AVI file to MP4 using FFmpeg.
+    3. Returns the base64-encoded MP4 file.
+
+    Args:
+        event (dict): The event payload containing the base64-encoded AVI file data.
+        context (object): AWS Lambda context object (not used in this function).
+
+    Returns:
+        dict: A dictionary containing the HTTP status code and the base64-encoded MP4 file.
+    """
     try:
-         
+        # Parse the incoming event body
         body = json.loads(event['body'])
+        
         # Decode the incoming base64 encoded AVI file data
         avi_data = base64.b64decode(body['avi_data'])
 
-        # Get the first 10 and last 10 bytes
+        # Get the first 10 and last 10 bytes of the AVI data for debugging purposes
         first_10_bytes = avi_data[:10]
         last_10_bytes = avi_data[-10:]
         
         print("First 10 bytes (hex):", first_10_bytes.hex())
         print("Last 10 bytes (hex):", last_10_bytes.hex())
 
-        # Use a temporary file to store the AVI
+        # Use a temporary file to store the AVI data
         with tempfile.NamedTemporaryFile(delete=False, suffix='.avi') as temp_avi_file:
             temp_avi_file_path = temp_avi_file.name
             temp_avi_file.write(avi_data)
@@ -50,6 +66,7 @@ def handler(event, context):
         }
 
     except Exception as e:
+        # Handle any errors that occur during processing
         print(f"Error: {str(e)}")
         return {
             "statusCode": 500,
@@ -57,6 +74,13 @@ def handler(event, context):
         }
 
 def convert_to_mp4(avi_file_path, mp4_file_path):
+    """
+    Converts an AVI file to MP4 using FFmpeg.
+
+    Args:
+        avi_file_path (str): Path to the input AVI file.
+        mp4_file_path (str): Path where the output MP4 file should be saved.
+    """
     command = [
         'ffmpeg',
         '-i', avi_file_path,
@@ -68,4 +92,5 @@ def convert_to_mp4(avi_file_path, mp4_file_path):
         '-y',  # Overwrite output files without asking
         mp4_file_path
     ]
+    # Execute the FFmpeg command
     subprocess.run(command, check=True)

@@ -1,4 +1,3 @@
-# Outline for Main function
 from create_image import create_image
 from check_wifi import is_internet_available
 from create_metadata import create_metadata
@@ -14,138 +13,197 @@ from save_metadata import save_metadata
 import os
 from upload_video import upload_video
 
-def main(fingerprint, media_input, camera_number_string, save_media_filepath, gps_lock, signature_lock, upload_lock):
-	'''main function for processing media for signing and uploading
-				media_input : for images = imread(image) ; for videos = video_filpath for reading bytes from
-				camera_number_string : number representing the actual device 
-				save_media_filepath : folder for storing the media (tmpImages or tmpVideos)
-		'''
-	print("Main Called; upload 1 image or video")
-	
-	if save_media_filepath.endswith('Images'):
+def main(fingerprint: str, media_input, camera_number_string: str, save_media_filepath: str, 
+         gps_lock, signature_lock, upload_lock):
+    """
+    Main function for processing and handling media (images/videos).
 
-		#print("We are dealing with an image here folks")
-		save_image_filepath = save_media_filepath
-#---------------------- Receive Image input  ----------------------------
-		image = media_input
-		# image = create_image()  # take the image
-		
-		_, encoded_image = cv2.imencode('.png', image)  # we send the encoded image to the cloud 
-		#print("main: Image captured")
+    This function processes media by capturing images or reading videos, fetching GPS data,
+    creating combined data structures, generating digests and signatures, and uploading
+    or saving the media based on internet availability.
 
-	#---------- Capture GNSS Data (Time and Location) ------------------------
+    Args:
+        fingerprint (str): The fingerprint identifier or username associated with the media.
+        media_input: For images, this is a cv2 image array; for videos, this is the file path as a string.
+        camera_number_string (str): The identifier for the camera/device capturing the media.
+        save_media_filepath (str): The directory path where media should be saved locally.
+        gps_lock (threading.Lock): A lock object to synchronize GPS data access.
+        signature_lock (threading.Lock): A lock object to synchronize signature creation.
+        upload_lock (threading.Lock): A lock object to synchronize upload operations.
 
-		lat_value, long_value, time_value, date_value =  read_gps_data(gps_lock)
-		location = (f"{lat_value}, {long_value}")
-		time = (f"{time_value}")
-		date = (f"{date_value}")
-		print(f"Recieved Time and GNSS Data: {time}{location}{date}")
+    Returns:
+        None
+    """
+    print("Main called; processing media for upload or local storage.")
 
-	#-------------- combine number + image + Time + Location ----------------------------------------------
+    # Check if processing an image or video based on the save path
+    if save_media_filepath.endswith('Images'):
+        # ---------------------- Process Image ----------------------------
+        print("Processing image.")
 
-		combined_data = create_combined(fingerprint, camera_number_string, encoded_image.tobytes(), date, time, location)   # returns combined data as a 
+        image = media_input  # Received image input as cv2 image array
 
-	# ---------------- Create digest for signing --------------------------
-		try:
-			digest = create_digest(combined_data)
+        # Encode the image to PNG format for transmission or storage
+        success, encoded_image = cv2.imencode('.png', image)
+        if not success:
+            print("Error: Failed to encode image.")
+            return
 
-		except Exception as e:
-			#print(str(e))
-			pass
+        print("Image encoded successfully.")
 
-	# ---------------- Send image to TPM for Signing ------------------------
-		try:
-			signature_string = create_signature(digest, signature_lock)  # byte64 encoded signature
-			
-		except Exception as e:
-			#print(str(e))
-			pass
+        # ---------- Capture GNSS Data (Time and Location) ------------------------
+        lat_value, long_value, time_value, date_value = read_gps_data(gps_lock)
+        location = f"{lat_value}, {long_value}"
+        time_str = f"{time_value}"
+        date_str = f"{date_value}"
 
-	#---------------- Create Metadata ------------------------------------
+        print(f"Received GPS Data - Date: {date_str}, Time: {time_str}, Location: {location}")
 
-		metadata = create_metadata(fingerprint, camera_number_string, date, time, location, signature_string)   # creates a dictionary for the strings [string, string, string, byte64]
+        # -------------- Combine Data for Digest Creation -------------------------
+        combined_data = create_combined(
+            fingerprint,
+            camera_number_string,
+            encoded_image.tobytes(),
+            date_str,
+            time_str,
+            location
+        )
+        print("Combined data created for digest.")
 
-	#------------------ Check if we have Wi-FI -----------------------------
+        # ---------------- Create Digest for Signing ------------------------------
+        try:
+            digest = create_digest(combined_data)
+            print("Digest created successfully.")
+        except Exception as e:
+            print(f"Error creating digest: {str(e)}")
+            return
 
-		with upload_lock:
-			print("We have upload_lock for image")
-			if is_internet_available():
-				print("Have lock trying to upload image from Main")
-				upload_image(encoded_image.tobytes(), metadata)   # cv2 png object, metadat
-				#print(f"Uploaded Image")
-			
-			else: 
-				save_image(encoded_image.tobytes(), metadata, save_image_filepath)
-				#print("No wifi")
+        # ---------------- Generate Signature Using TPM ---------------------------
+        try:
+            signature_string = create_signature(digest, signature_lock)
+            print("Signature generated successfully.")
+        except Exception as e:
+            print(f"Error generating signature: {str(e)}")
+            return
 
-	else: # if we are working with a video
-		save_video_filepath = save_media_filepath
-		#video_filepath = os.path.join(save_video_filepath, media_input)
-		video_filepath = media_input
+        # ---------------- Create Metadata Dictionary -----------------------------
+        metadata = create_metadata(
+            fingerprint,
+            camera_number_string,
+            date_str,
+            time_str,
+            location,
+            signature_string
+        )
+        print("Metadata created successfully.")
 
-	#---------- Capture GNSS Data (Time and Location) ------------------------
+        # ---------------- Upload or Save Image Based on Internet Availability -----
+        with upload_lock:
+            print("Acquired upload lock for image processing.")
+            if is_internet_available():
+                try:
+                    print("Internet available. Attempting to upload image.")
+                    upload_image(encoded_image.tobytes(), metadata)
+                    print("Image uploaded successfully.")
+                except Exception as e:
+                    print(f"Error uploading image: {str(e)}")
+                    print("Saving image locally due to upload failure.")
+                    save_image(encoded_image.tobytes(), metadata, save_media_filepath)
+            else:
+                print("No internet connection. Saving image locally.")
+                save_image(encoded_image.tobytes(), metadata, save_media_filepath)
 
-		lat_value, long_value, time_value, date_value =  read_gps_data(gps_lock)
-		location = (f"{lat_value}, {long_value}")
-		time = (f"{time_value}")
-		date = (f"{date_value}")
-		#print(f"Recieved Time and GNSS Data: {time}{location}")
+    else:
+        # ---------------------- Process Video ----------------------------
+        print("Processing video.")
 
-	#---------------------- Receive Video input  ----------------------------
+        video_filepath = media_input  # Video file path provided as input
 
-		with upload_lock:  # must have the lock the entire time because reading video from storage and deciding if we should upload or save metadata to JSON
-			print("We have upload_lock for video")
+        # ---------- Capture GNSS Data (Time and Location) ------------------------
+        lat_value, long_value, time_value, date_value = read_gps_data(gps_lock)
+        location = f"{lat_value}, {long_value}"
+        time_str = f"{time_value}"
+        date_str = f"{date_value}"
 
-			#  IN OUR CASE, VIDEOS WILL BE READ FROM STORAGE AND UPLOADED IN THE BACKGROUND 
-			with open(video_filepath, 'rb') as video:
-				video_bytes = video.read()
-			
-			#print("main: Image captured")
-			#print("Last 10 bytes of video: ", video_bytes[-10:])
+        print(f"Received GPS Data - Date: {date_str}, Time: {time_str}, Location: {location}")
 
-	#-------------- combine number + image + Time + Location ----------------------------------------------
+        with upload_lock:
+            print("Acquired upload lock for video processing.")
 
-		combined_data = create_combined(fingerprint, camera_number_string, video_bytes, date, time, location)   # returns combined data as a 
+            # Read video bytes from the specified file path
+            try:
+                with open(video_filepath, 'rb') as video_file:
+                    video_bytes = video_file.read()
+                print("Video file read successfully.")
+            except Exception as e:
+                print(f"Error reading video file: {str(e)}")
+                return
 
-	# ---------------- Create digest for signing --------------------------
-		try:
-			digest = create_digest(combined_data)
+            # -------------- Combine Data for Digest Creation ---------------------
+            combined_data = create_combined(
+                fingerprint,
+                camera_number_string,
+                video_bytes,
+                date_str,
+                time_str,
+                location
+            )
+            print("Combined data created for digest.")
 
-		except Exception as e:
-			#print(str(e))
-			pass
-	# ---------------- Send image to TPM for Signing ------------------------
-		try:
-			signature_string = create_signature(digest, signature_lock)  # byte64 encoded signature
-			
-		except Exception as e:
-			#print(str(e))
-			pass
-	#---------------- Create Metadata ------------------------------------
+            # ---------------- Create Digest for Signing --------------------------
+            try:
+                digest = create_digest(combined_data)
+                print("Digest created successfully.")
+            except Exception as e:
+                print(f"Error creating digest: {str(e)}")
+                return
 
-		try:
-			metadata = create_metadata(fingerprint, camera_number_string, date, time, location, signature_string)   # creates a dictionary for the strings [string, string, string, byte64]
-		
-		except Exception as e:
-			#print(f"Could not create metadata for video: {str(e)}")
-			pass
+            # ---------------- Generate Signature Using TPM -----------------------
+            try:
+                signature_string = create_signature(digest, signature_lock)
+                print("Signature generated successfully.")
+            except Exception as e:
+                print(f"Error generating signature: {str(e)}")
+                return
 
-		try:
-			base, _ = os.path.splitext(media_input)
-			save_metadata_filepath = base + ".json"
-			save_metadata(metadata, save_metadata_filepath)
-		
-		except Exception as e:
-			#print(f"Could not save metadata for video: {str(e)}")
-			pass
+            # ---------------- Create Metadata Dictionary -------------------------
+            try:
+                metadata = create_metadata(
+                    fingerprint,
+                    camera_number_string,
+                    date_str,
+                    time_str,
+                    location,
+                    signature_string
+                )
+                print("Metadata created successfully.")
+            except Exception as e:
+                print(f"Error creating metadata: {str(e)}")
+                return
 
-		if is_internet_available():
-			try:
-				print("Have lock trying to upload video from Main")
-				upload_video(video_bytes, metadata)  
-				os.remove(video_filepath)  # remove the video after uploading
-				os.remove(save_metadata_filepath)  # remove the metadata after uploading
+            # ---------------- Save Metadata Locally ------------------------------
+            try:
+                base_filename = os.path.splitext(os.path.basename(video_filepath))[0]
+                metadata_filepath = os.path.join(save_media_filepath, f"{base_filename}.json")
+                save_metadata(metadata, metadata_filepath)
+                print(f"Metadata saved locally at {metadata_filepath}.")
+            except Exception as e:
+                print(f"Error saving metadata: {str(e)}")
+                return
 
-			except Exception as e:
-				#print(str(e))
-				pass
+            # ---------------- Upload or Save Video Based on Internet Availability -
+            if is_internet_available():
+                try:
+                    print("Internet available. Attempting to upload video.")
+                    upload_video(video_bytes, metadata)
+                    print("Video uploaded successfully.")
+
+                    # Remove local files after successful upload
+                    os.remove(video_filepath)
+                    os.remove(metadata_filepath)
+                    print("Local video and metadata files deleted after upload.")
+                except Exception as e:
+                    print(f"Error uploading video: {str(e)}")
+                    print("Video and metadata files will remain saved locally due to upload failure.")
+            else:
+                print("No internet connection. Video and metadata files saved locally for later upload.")
