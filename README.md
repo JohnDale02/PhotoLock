@@ -5,6 +5,10 @@
 
 The PhotoLock project provides a robust solution for authenticating and verifying the integrity of images and videos. In an era where digital media can easily be manipulated through sophisticated tools and AI, our system offers a scalable infrastructure for capturing, uploading, and verifying authentic media. This project ensures that media can be tied back to specific users and devices, providing a trustworthy source for news, social media, and other platforms that rely on digital content.
 
+## Watch our demo video below to see PhotoLock in action:
+
+<iframe width="560" height="315" src="https://www.youtube.com/embed/JTpTnfJgP68" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen></iframe>
+
 ## Key Features
 
 - **Hardware Root of Trust:** Utilizes a Trusted Platform Module (TPM) to securely sign media captured by the device.
