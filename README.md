@@ -5,6 +5,8 @@
 
 The PhotoLock project provides a robust solution for authenticating and verifying the integrity of images and videos. In an era where digital media can easily be manipulated through sophisticated tools and AI, our system offers a scalable infrastructure for capturing, uploading, and verifying authentic media. This project ensures that media can be tied back to specific users and devices, providing a trustworthy source for news, social media, and other platforms that rely on digital content.
 
+![Solution Overview Image](./Overview.png)
+
 ## Checkout the Twitter Clone repo which integrates with PhotoLock below:
 https://github.com/JohnDale02/twitter-clone
 
